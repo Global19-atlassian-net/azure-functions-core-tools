@@ -278,13 +278,7 @@ namespace Build
 
                 unSignedFiles.ForEach(filePath => File.Delete(filePath));
 
-                var unSignedPackages = GetUnsignedBinaries(targetDir);
-                if (unSignedPackages.Count() != 0)
-                {
-                    var missingSignature = string.Join($",{Environment.NewLine}", unSignedPackages);
-                    ColoredConsole.Error.WriteLine($"This files are missing valid signatures: {Environment.NewLine}{missingSignature}");
-                    throw new Exception($"sigcheck.exe test failed. Following files are unsigned: {Environment.NewLine}{missingSignature}");
-                }
+                CheckSignedBinaries(targetDir);
             }
         }
 
@@ -301,17 +295,29 @@ namespace Build
                     Directory.CreateDirectory(targetDir);
                     ZipFile.ExtractToDirectory(zipFilePath, targetDir);
 
-                    var unSignedPackages = GetUnsignedBinaries(targetDir);
-                    if (unSignedPackages.Count() != 0)
-                    {
-                        var missingSignature = string.Join($",{Environment.NewLine}", unSignedPackages);
-                        ColoredConsole.Error.WriteLine($"This files are missing valid signatures: {Environment.NewLine}{missingSignature}");
-                        throw new Exception($"sigcheck.exe test failed. Following files are unsigned: {Environment.NewLine}{missingSignature}");
-                    }
+                    CheckSignedBinaries(targetDir);
                 }
             }
         }
 
+        private static void CheckSignedBinaries(string targetDir)
+        {
+            var unSignedPackages = GetUnsignedBinaries(targetDir);
+            if (unSignedPackages.Count() != 0)
+            {
+                var missingSignature = string.Join($",{Environment.NewLine}", unSignedPackages);
+                ColoredConsole.Error.WriteLine($"These files are missing valid signatures: {Environment.NewLine}{missingSignature}");
+                throw new Exception($"sigcheck.exe test failed. Following files are unsigned: {Environment.NewLine}{missingSignature}");
+            }
+
+            var delaySigned = GetDelaySignedBinaries(targetDir);
+            if (delaySigned.Count() != 0)
+            {
+                var delayed = string.Join($",{Environment.NewLine}", delaySigned);
+                ColoredConsole.Error.WriteLine($"These files with strong names are delay-signed or test-signed: {Environment.NewLine}{delayed}");
+                throw new Exception($"sn.exe test failed. Following files are delay-signed or test-signed: {Environment.NewLine}{delayed}");
+            }
+        }
 
         public static async Task UploadZipToSignAsync()
         {
@@ -469,6 +475,35 @@ namespace Build
             // Filter out files we don't want to verify
             unSignedPackages = unSignedPackages.Where(file => !Settings.SignInfo.SkipSigcheckTest.Any(ext => file.EndsWith(ext))).ToList();
             return unSignedPackages;
+        }
+
+        private static List<string> GetDelaySignedBinaries(string targetDir)
+        {
+            // This will only work in Windows and assumes that "sn" tool is present in this expected location.
+            // We are ok doing this right now as this doesn't run in a normal build scenario and only when we need to validate
+            // signing. This only happens today in our release pipeline.
+            string snLocation = "C:\\Program Files (x86)\\Microsoft SDKs\\Windows\\v10.0A\\bin\\Netfx 4.8 Tools\\sn.exe";
+
+            Console.WriteLine($"Checking if any assemblies in '{targetDir} are delay-signed or test-signed using tool '{snLocation}'");
+
+            string[] files = Directory.GetFiles(targetDir, "*", SearchOption.AllDirectories);
+            var delaySigned = new List<string>();
+
+            foreach (string file in files)
+            {
+                var commandOutput = Shell.GetOutput(snLocation, $" -q -vf {file}", ignoreExitCode: true);
+                if (commandOutput.Contains("delay-signed", StringComparison.OrdinalIgnoreCase)
+                    || commandOutput.Contains("test-signed", StringComparison.OrdinalIgnoreCase))
+                {
+                    delaySigned.Add(file);
+                }
+                if (!string.IsNullOrEmpty(commandOutput) && !commandOutput.Contains(file))
+                {
+                    throw new Exception($"Something went wrong while running 'sn.exe'. Command output does not contain the file name as expected. Output: {commandOutput}");
+                }
+            }
+
+            return delaySigned;
         }
 
         public static void Zip()
